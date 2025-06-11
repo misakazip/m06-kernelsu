@@ -25,7 +25,7 @@ env:
   CLANG_BRANCH: "main"
   CLANG_VERSION: "clang-r522817"
   GCC_AARCH64_REPO: "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9"
-  GCC_AARCH64_BRANCH: "main"
+  GCC_AARCH64_BRANCH: "android12-release"
   GCC_ARM_REPO: "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9"
   GCC_ARM_BRANCH: "android12-release"
   
