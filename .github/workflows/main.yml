@@ -20,6 +20,15 @@ env:
   MODULE_BRANCH: "lineage-22.2"
   MODULE_DIR: "sm7435-module"
   
+  # Toolchain configuration
+  CLANG_REPO: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86"
+  CLANG_BRANCH: "main"
+  CLANG_VERSION: "clang-r522817"
+  GCC_AARCH64_REPO: "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9"
+  GCC_AARCH64_BRANCH: "main"
+  GCC_ARM_REPO: "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9"
+  GCC_ARM_BRANCH: "android12-release"
+  
   # Build environment
   KERNEL_DIR: "sm7435"
   ANYKERNEL_DIR: "anykernel3"
@@ -102,21 +111,39 @@ jobs:
         mkdir -p ${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}
         cd ${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}
         
-        # Download prebuilt clang
-        echo "Downloading Clang..."
-        git clone --depth=1 --single-branch \
-          https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
-          clang
+        # Download prebuilt clang from AOSP
+        echo "Downloading Clang from AOSP..."
+        git clone --depth=1 --single-branch --branch=${CLANG_BRANCH} \
+          ${CLANG_REPO} clang-repo
         
-        # Download GCC toolchains
-        echo "Downloading GCC toolchains..."
-        git clone --depth=1 --single-branch \
-          https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
-          gcc-aarch64
+        # Extract the specific clang version
+        if [ -d "clang-repo/${CLANG_VERSION}" ]; then
+          cp -r clang-repo/${CLANG_VERSION} clang
+          echo "Using Clang version: ${CLANG_VERSION}"
+        else
+          echo "Clang version ${CLANG_VERSION} not found, using latest available"
+          # Find the latest clang version
+          LATEST_CLANG=$(ls clang-repo/ | grep "clang-r" | sort -V | tail -1)
+          if [ -n "$LATEST_CLANG" ]; then
+            cp -r clang-repo/${LATEST_CLANG} clang
+            echo "Using latest Clang version: ${LATEST_CLANG}"
+          else
+            echo "No suitable Clang version found"
+            exit 1
+          fi
+        fi
         
-        git clone --depth=1 --single-branch \
-          https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git \
-          gcc-arm
+        # Clean up clang repo to save space
+        rm -rf clang-repo
+        
+        # Download GCC toolchains from AOSP
+        echo "Downloading GCC aarch64 toolchain from AOSP..."
+        git clone --depth=1 --single-branch --branch=${GCC_AARCH64_BRANCH} \
+          ${GCC_AARCH64_REPO} gcc-aarch64
+        
+        echo "Downloading GCC arm toolchain from AOSP..."
+        git clone --depth=1 --single-branch --branch=${GCC_ARM_BRANCH} \
+          ${GCC_ARM_REPO} gcc-arm
         
         # Set up environment
         CLANG_PATH="${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}/clang/bin"
@@ -127,7 +154,11 @@ jobs:
         echo "CLANG_PATH=${CLANG_PATH}" >> $GITHUB_ENV
         
         # Verify toolchain installation
+        echo "Verifying toolchain installation..."
         ls -la ${CLANG_PATH}/
+        ${CLANG_PATH}/clang --version
+        ${GCC_AARCH64_PATH}/aarch64-linux-android-gcc --version
+        ${GCC_ARM_PATH}/arm-linux-androideabi-gcc --version
         echo "Toolchain setup completed"
     
     - name: Configure kernel
@@ -169,6 +200,12 @@ jobs:
         # Get number of CPU cores
         THREADS=$(nproc --all)
         echo "Building with ${THREADS} threads..."
+        
+        # Get toolchain versions for logging
+        echo "Toolchain versions:"
+        clang --version
+        aarch64-linux-android-gcc --version | head -1
+        arm-linux-androideabi-gcc --version | head -1
         
         # Build kernel and all images
         make O=${GITHUB_WORKSPACE}/${OUTPUT_DIR} \
@@ -380,6 +417,11 @@ jobs:
         COMMIT_HASH=$(git rev-parse HEAD)
         COMMIT_MESSAGE=$(git log --oneline -1)
         
+        # Get toolchain versions
+        CLANG_VER=$(clang --version | head -1)
+        GCC_AARCH64_VER=$(aarch64-linux-android-gcc --version | head -1)
+        GCC_ARM_VER=$(arm-linux-androideabi-gcc --version | head -1)
+        
         # Check what files were actually built
         BUILT_FILES=""
         if [ -f "${GITHUB_WORKSPACE}/build_output/boot.img" ]; then
@@ -424,8 +466,13 @@ jobs:
         - Message: ${COMMIT_MESSAGE}
         
         Toolchain Information:
-        - Clang: ${CLANG_VERSION}
-        - GCC: AOSP prebuilt
+        - Clang: ${CLANG_VER}
+        - GCC aarch64: ${GCC_AARCH64_VER}
+        - GCC arm: ${GCC_ARM_VER}
+        - Clang Version: ${CLANG_VERSION}
+        - Clang Branch: ${CLANG_BRANCH}
+        - GCC aarch64 Branch: ${GCC_AARCH64_BRANCH}
+        - GCC arm Branch: ${GCC_ARM_BRANCH}
         
         Built Files:${BUILT_FILES}
         EOF
@@ -467,9 +514,10 @@ jobs:
           - Repository: ${{ env.KERNEL_REPO }}
           - Branch: ${{ env.KERNEL_BRANCH }}
           
-          **Toolchain:**
-          - Clang: ${{ env.CLANG_VERSION }}
-          - GCC: AOSP prebuilt toolchain
+          **Toolchain (AOSP):**
+          - Clang: ${{ env.CLANG_VERSION }} (Branch: ${{ env.CLANG_BRANCH }})
+          - GCC aarch64: AOSP prebuilt (Branch: ${{ env.GCC_AARCH64_BRANCH }})
+          - GCC arm: AOSP prebuilt (Branch: ${{ env.GCC_ARM_BRANCH }})
           
           **Built Files:**
           - 📦 AnyKernel3 flashable zip
