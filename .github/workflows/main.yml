@@ -1,0 +1,498 @@
+name: Android Kernel Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly build on Sunday
+
+env:
+  # Kernel configuration
+  KERNEL_REPO: "https://git.misaka.zip/misaka/kernel_fcnt_sm7435.git"
+  KERNEL_BRANCH: "lineage-22.2"
+  DEVICE_NAME: "m06"
+  ARCH: "arm64"
+  DEFCONFIG: "gki_defconfig vendor/parrot_GKI.config"
+  
+  # Additional repositories
+  MODULE_REPO: "https://git.misaka.zip/misaka/kernel_fcnt_sm7435-modules.git"
+  MODULE_BRANCH: "lineage-22.2"
+  MODULE_DIR: "sm7435-module"
+  
+  # Build environment
+  KERNEL_DIR: "sm7435"
+  ANYKERNEL_DIR: "anykernel3"
+  TOOLCHAIN_DIR: "toolchain"
+  OUTPUT_DIR: "out"
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Free up disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf "/usr/local/share/boost"
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        df -h
+    
+    - name: Set up build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          bc \
+          bison \
+          flex \
+          libssl-dev \
+          libelf-dev \
+          git \
+          rsync \
+          zip \
+          python3 \
+          python3-pip \
+          curl \
+          wget \
+          ccache \
+          ninja-build \
+          lz4 \
+          zstd
+        
+        # Set up ccache
+        echo "/usr/lib/ccache" >> $GITHUB_PATH
+        ccache -M 2G
+        
+        # Create directories
+        mkdir -p ${GITHUB_WORKSPACE}/${OUTPUT_DIR}
+        mkdir -p ${GITHUB_WORKSPACE}/build_output
+    
+    - name: Clone kernel repository
+      run: |
+        echo "Cloning Android kernel repository..."
+        git clone --depth=1 --single-branch --branch=${KERNEL_BRANCH} \
+          ${KERNEL_REPO} ${GITHUB_WORKSPACE}/${KERNEL_DIR}
+        
+        cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
+        echo "Kernel repository cloned successfully"
+        echo "Latest commit: $(git log --oneline -1)"
+    
+    - name: Clone module repository
+      run: |
+        echo "Cloning vendor repository..."
+        git clone --depth=1 --single-branch --branch=${MODULE_BRANCH} \
+          ${MODULE_REPO} ${GITHUB_WORKSPACE}/${MODULE_DIR}
+        echo "Module repository cloned successfully"
+    
+    - name: Clone AnyKernel3
+      run: |
+        echo "Cloning AnyKernel3..."
+        git clone --depth=1 \
+          https://github.com/misakazip/AnyKernel3.git ${GITHUB_WORKSPACE}/${ANYKERNEL_DIR}
+        echo "AnyKernel3 cloned successfully"
+    
+    - name: Download AOSP toolchain
+      run: |
+        echo "Setting up AOSP toolchain..."
+        mkdir -p ${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}
+        cd ${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}
+        
+        # Download prebuilt clang
+        echo "Downloading Clang..."
+        git clone --depth=1 --single-branch \
+          https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
+          clang
+        
+        # Download GCC toolchains
+        echo "Downloading GCC toolchains..."
+        git clone --depth=1 --single-branch \
+          https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
+          gcc-aarch64
+        
+        git clone --depth=1 --single-branch \
+          https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git \
+          gcc-arm
+        
+        # Set up environment
+        CLANG_PATH="${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}/clang/clang/bin"
+        GCC_AARCH64_PATH="${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}/gcc-aarch64/bin"
+        GCC_ARM_PATH="${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}/gcc-arm/bin"
+        
+        echo "PATH=${CLANG_PATH}:${GCC_AARCH64_PATH}:${GCC_ARM_PATH}:${PATH}" >> $GITHUB_ENV
+        echo "CLANG_PATH=${CLANG_PATH}" >> $GITHUB_ENV
+        
+        # Verify toolchain installation
+        ls -la ${CLANG_PATH}/
+        echo "Toolchain setup completed"
+    
+    - name: Configure kernel
+      run: |
+        echo "Configuring kernel..."
+        cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
+        
+        # Set build environment
+        export ARCH=${ARCH}
+        export SUBARCH=${ARCH}
+        export CROSS_COMPILE=aarch64-linux-android-
+        export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+        export CC=clang
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        
+        # Clean previous builds
+        make clean && make mrproper
+        
+        # Configure with defconfig
+        make O=${GITHUB_WORKSPACE}/${OUTPUT_DIR} ${DEFCONFIG}
+        
+        echo "Kernel configuration completed"
+    
+    - name: Build kernel and boot image
+      run: |
+        echo "Building kernel and boot image..."
+        cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
+        
+        # Set build environment
+        export ARCH=${ARCH}
+        export SUBARCH=${ARCH}
+        export CROSS_COMPILE=aarch64-linux-android-
+        export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+        export CC=clang
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export LLVM=1
+        export LLVM_IAS=1
+        
+        # Get number of CPU cores
+        THREADS=$(nproc --all)
+        echo "Building with ${THREADS} threads..."
+        
+        # Build kernel and all images
+        make O=${GITHUB_WORKSPACE}/${OUTPUT_DIR} \
+          ARCH=${ARCH} \
+          CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-android- \
+          CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+          LLVM=1 \
+          LLVM_IAS=1 \
+          -j${THREADS} \
+          all
+        
+        echo "Kernel build completed successfully"
+        
+        # Check what was built
+        echo "Checking build outputs..."
+        find ${GITHUB_WORKSPACE}/${OUTPUT_DIR} -name "*.img" -o -name "Image*" -o -name "zImage*" | head -20
+    
+    - name: Extract build artifacts
+      run: |
+        echo "Extracting build artifacts..."
+        
+        # Find and copy kernel image
+        if [ "${ARCH}" = "arm64" ]; then
+          KERNEL_IMAGE="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/arm64/boot/Image.gz"
+          if [ -f "${KERNEL_IMAGE}" ]; then
+            cp ${KERNEL_IMAGE} ${GITHUB_WORKSPACE}/build_output/
+            echo "KERNEL_IMAGE=${KERNEL_IMAGE}" >> $GITHUB_ENV
+            echo "Kernel image copied: Image.gz"
+          else
+            # Try alternative locations
+            KERNEL_IMAGE="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/arm64/boot/Image"
+            if [ -f "${KERNEL_IMAGE}" ]; then
+              cp ${KERNEL_IMAGE} ${GITHUB_WORKSPACE}/build_output/
+              echo "KERNEL_IMAGE=${KERNEL_IMAGE}" >> $GITHUB_ENV
+              echo "Kernel image copied: Image"
+            fi
+          fi
+        elif [ "${ARCH}" = "arm" ]; then
+          KERNEL_IMAGE="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/arm/boot/zImage"
+          if [ -f "${KERNEL_IMAGE}" ]; then
+            cp ${KERNEL_IMAGE} ${GITHUB_WORKSPACE}/build_output/
+            echo "KERNEL_IMAGE=${KERNEL_IMAGE}" >> $GITHUB_ENV
+            echo "Kernel image copied: zImage"
+          fi
+        fi
+        
+        # Look for boot.img in various locations
+        BOOT_IMG_FOUND=false
+        BOOT_IMG_LOCATIONS=(
+          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/boot.img"
+          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/${ARCH}/boot/boot.img"
+          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/images/boot.img"
+          "${GITHUB_WORKSPACE}/${KERNEL_DIR}/boot.img"
+        )
+        
+        for location in "${BOOT_IMG_LOCATIONS[@]}"; do
+          if [ -f "${location}" ]; then
+            cp "${location}" ${GITHUB_WORKSPACE}/build_output/
+            echo "BOOT_IMG=${location}" >> $GITHUB_ENV
+            echo "boot.img found and copied from: ${location}"
+            BOOT_IMG_FOUND=true
+            break
+          fi
+        done
+        
+        if [ "$BOOT_IMG_FOUND" = false ]; then
+          echo "boot.img not found in expected locations"
+          echo "Searching for any .img files..."
+          find ${GITHUB_WORKSPACE}/${OUTPUT_DIR} -name "*.img" -type f
+        fi
+        
+        # Copy device tree blobs
+        DTB_DIR="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/${ARCH}/boot/dts"
+        if [ -d "${DTB_DIR}" ]; then
+          find ${DTB_DIR} -name "*.dtb" -exec cp {} ${GITHUB_WORKSPACE}/build_output/ \;
+          echo "DTB files copied"
+        fi
+        
+        # Copy DTBO if exists
+        DTBO_LOCATIONS=(
+          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/${ARCH}/boot/dtbo.img"
+          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/dtbo.img"
+          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/images/dtbo.img"
+        )
+        
+        for location in "${DTBO_LOCATIONS[@]}"; do
+          if [ -f "${location}" ]; then
+            cp "${location}" ${GITHUB_WORKSPACE}/build_output/
+            echo "DTBO copied from: ${location}"
+            break
+          fi
+        done
+        
+        # Copy vendor_boot.img if exists
+        VENDOR_BOOT_LOCATIONS=(
+          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/vendor_boot.img"
+          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/images/vendor_boot.img"
+        )
+        
+        for location in "${VENDOR_BOOT_LOCATIONS[@]}"; do
+          if [ -f "${location}" ]; then
+            cp "${location}" ${GITHUB_WORKSPACE}/build_output/
+            echo "vendor_boot.img copied from: ${location}"
+            break
+          fi
+        done
+        
+        # Install kernel modules
+        if [ -d "${GITHUB_WORKSPACE}/${OUTPUT_DIR}" ]; then
+          make O=${GITHUB_WORKSPACE}/${OUTPUT_DIR} \
+            ARCH=${ARCH} \
+            CROSS_COMPILE=aarch64-linux-android- \
+            INSTALL_MOD_PATH=${GITHUB_WORKSPACE}/build_output \
+            modules_install 2>/dev/null || echo "No modules to install"
+        fi
+        
+        echo "Build artifacts extraction completed"
+        echo "Available files in build_output:"
+        ls -la ${GITHUB_WORKSPACE}/build_output/
+    
+    - name: Package with AnyKernel3
+      run: |
+        echo "Packaging with AnyKernel3..."
+        cd ${GITHUB_WORKSPACE}/${ANYKERNEL_DIR}
+        
+        # Clean existing files
+        rm -f Image.gz Image zImage dtb *.img
+        
+        # Configure AnyKernel3
+        cat > anykernel.sh << 'EOF'
+        # AnyKernel3 Ramdisk Mod Script
+        # osm0sis @ xda-developers
+        
+        ## AnyKernel setup
+        # begin properties
+        properties() { '
+        kernel.string=Android Kernel by misakazip @ $(date +%Y-%m-%d)
+        do.devicecheck=0
+        do.modules=0
+        do.systemless=1
+        do.cleanup=1
+        do.cleanuponabort=0
+        device.name1=m06
+        device.name2=parrot
+        device.name3=
+        device.name4=
+        device.name5=
+        supported.versions=14,15
+        supported.patchlevels=
+        '; } # end properties
+        
+        # shell variables
+        block=/dev/block/bootdevice/by-name/boot;
+        is_slot_device=true;
+        ramdisk_compression=auto;
+        patch_vbmeta_flag=auto;
+        
+        ## AnyKernel methods (DO NOT CHANGE)
+        # import patching functions/variables - see for reference
+        . tools/ak3-core.sh;
+        
+        ## AnyKernel file attributes
+        # set permissions/ownership for included ramdisk files
+        set_perm_recursive 0 0 755 644 $ramdisk/*;
+        set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
+        
+        ## AnyKernel install
+        dump_boot;
+        write_boot;
+        ## end install
+        EOF
+        
+        # Copy kernel image
+        if [ "${ARCH}" = "arm64" ]; then
+          if [ -f "${GITHUB_WORKSPACE}/build_output/Image.gz" ]; then
+            cp ${GITHUB_WORKSPACE}/build_output/Image.gz ./
+          elif [ -f "${GITHUB_WORKSPACE}/build_output/Image" ]; then
+            cp ${GITHUB_WORKSPACE}/build_output/Image ./
+          fi
+        elif [ "${ARCH}" = "arm" ]; then
+          if [ -f "${GITHUB_WORKSPACE}/build_output/zImage" ]; then
+            cp ${GITHUB_WORKSPACE}/build_output/zImage ./
+          fi
+        fi
+        
+        # Copy DTB files if they exist
+        if ls ${GITHUB_WORKSPACE}/build_output/*.dtb 1> /dev/null 2>&1; then
+          cp ${GITHUB_WORKSPACE}/build_output/*.dtb ./
+          echo "DTB files added to AnyKernel3"
+        fi
+        
+        # Create timestamp
+        BUILD_DATE=$(date +%Y%m%d-%H%M)
+        
+        # Create AnyKernel3 zip
+        zip -r9 ${GITHUB_WORKSPACE}/build_output/${DEVICE_NAME}-kernel-${BUILD_DATE}.zip \
+          * -x .git README.md *placeholder
+        
+        echo "AnyKernel3 package created: ${DEVICE_NAME}-kernel-${BUILD_DATE}.zip"
+        ls -la ${GITHUB_WORKSPACE}/build_output/*.zip
+    
+    - name: Generate build info
+      run: |
+        cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
+        BUILD_DATE=$(date +"%Y-%m-%d %H:%M:%S UTC")
+        KERNEL_VERSION=$(make kernelversion 2>/dev/null || echo "Unknown")
+        COMMIT_HASH=$(git rev-parse HEAD)
+        COMMIT_MESSAGE=$(git log --oneline -1)
+        
+        # Check what files were actually built
+        BUILT_FILES=""
+        if [ -f "${GITHUB_WORKSPACE}/build_output/boot.img" ]; then
+          BUILT_FILES="${BUILT_FILES}\n- boot.img ($(du -h ${GITHUB_WORKSPACE}/build_output/boot.img | cut -f1))"
+        fi
+        if [ -f "${GITHUB_WORKSPACE}/build_output/Image.gz" ]; then
+          BUILT_FILES="${BUILT_FILES}\n- Image.gz ($(du -h ${GITHUB_WORKSPACE}/build_output/Image.gz | cut -f1))"
+        fi
+        if [ -f "${GITHUB_WORKSPACE}/build_output/Image" ]; then
+          BUILT_FILES="${BUILT_FILES}\n- Image ($(du -h ${GITHUB_WORKSPACE}/build_output/Image | cut -f1))"
+        fi
+        if [ -f "${GITHUB_WORKSPACE}/build_output/zImage" ]; then
+          BUILT_FILES="${BUILT_FILES}\n- zImage ($(du -h ${GITHUB_WORKSPACE}/build_output/zImage | cut -f1))"
+        fi
+        if ls ${GITHUB_WORKSPACE}/build_output/*.zip 1> /dev/null 2>&1; then
+          for zip in ${GITHUB_WORKSPACE}/build_output/*.zip; do
+            BUILT_FILES="${BUILT_FILES}\n- $(basename $zip) ($(du -h $zip | cut -f1))"
+          done
+        fi
+        if ls ${GITHUB_WORKSPACE}/build_output/*.dtb 1> /dev/null 2>&1; then
+          DTB_COUNT=$(ls ${GITHUB_WORKSPACE}/build_output/*.dtb | wc -l)
+          BUILT_FILES="${BUILT_FILES}\n- ${DTB_COUNT} DTB files"
+        fi
+        
+        cat > ${GITHUB_WORKSPACE}/build_output/build_info.txt << EOF
+        Android Kernel Build Information
+        ================================
+        
+        Build Date: ${BUILD_DATE}
+        Builder: misakazip
+        
+        Kernel Information:
+        - Version: ${KERNEL_VERSION}
+        - Architecture: ${ARCH}
+        - Defconfig: ${DEFCONFIG}
+        - Device: ${DEVICE_NAME}
+        
+        Source Information:
+        - Repository: ${KERNEL_REPO}
+        - Branch: ${KERNEL_BRANCH}
+        - Commit: ${COMMIT_HASH}
+        - Message: ${COMMIT_MESSAGE}
+        
+        Toolchain Information:
+        - Clang: ${CLANG_VERSION}
+        - GCC: AOSP prebuilt
+        
+        Built Files:${BUILT_FILES}
+        EOF
+        
+        echo "Build information generated"
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-kernel-${{ env.DEVICE_NAME }}-${{ env.ARCH }}-$(date +%Y%m%d-%H%M)
+        path: |
+          build_output/*.zip
+          build_output/*.img
+          build_output/Image.gz
+          build_output/Image
+          build_output/zImage
+          build_output/*.dtb
+          build_output/build_info.txt
+        retention-days: 30
+        compression-level: 9
+    
+    - name: Create release
+      if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: kernel-${{ env.DEVICE_NAME }}-$(date +%Y%m%d-%H%M)
+        name: Android Kernel Build - ${{ env.DEVICE_NAME }} (${{ env.ARCH }})
+        body: |
+          ## Android Kernel Build
+          
+          **Build Information:**
+          - Device: ${{ env.DEVICE_NAME }}
+          - Architecture: ${{ env.ARCH }}
+          - Defconfig: ${{ env.DEFCONFIG }}
+          - Build Date: $(date +"%Y-%m-%d %H:%M UTC")
+          - Builder: misakazip
+          
+          **Source:**
+          - Repository: ${{ env.KERNEL_REPO }}
+          - Branch: ${{ env.KERNEL_BRANCH }}
+          
+          **Toolchain:**
+          - Clang: ${{ env.CLANG_VERSION }}
+          - GCC: AOSP prebuilt toolchain
+          
+          **Built Files:**
+          - 📦 AnyKernel3 flashable zip
+          - 🥾 boot.img (if generated during build)
+          - 🐧 Kernel image (Image.gz/Image/zImage)
+          - 🌳 Device tree blobs (if available)
+          - 📄 Build information
+          
+          **Installation:**
+          1. Flash the AnyKernel3 zip via custom recovery (recommended)
+          2. Or use `fastboot flash boot boot.img` (if boot.img is available)
+        files: |
+          build_output/*.zip
+          build_output/*.img
+          build_output/build_info.txt
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Cleanup
+      if: always()
+      run: |
+        echo "Cleaning up build environment..."
+        ccache -s
+        df -h
