@@ -119,7 +119,7 @@ jobs:
           gcc-arm
         
         # Set up environment
-        CLANG_PATH="${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}/clang/clang/bin"
+        CLANG_PATH="${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}/clang/bin"
         GCC_AARCH64_PATH="${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}/gcc-aarch64/bin"
         GCC_ARM_PATH="${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}/gcc-arm/bin"
         
