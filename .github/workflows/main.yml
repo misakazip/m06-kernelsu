@@ -149,7 +149,7 @@ jobs:
         # Set build environment
         export ARCH=${ARCH}
         export SUBARCH=${ARCH}
-        export CROSS_COMPILE=aarch64-linux-android-
+        export CROSS_COMPILE=aarch64-buildroot-linux-gnu-
         export CROSS_COMPILE_ARM32=arm-linux-androideabi-
         export CC=clang
         export CLANG_TRIPLE=aarch64-buildroot-linux-gnu-
@@ -173,7 +173,7 @@ jobs:
         export CROSS_COMPILE=aarch64-buildroot-linux-gnu-
         export CROSS_COMPILE_ARM32=arm-linux-androideabi-
         export CC=clang
-        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export CLANG_TRIPLE=aarch64-buildroot-linux-gnu-
         export LLVM=1
         export LLVM_IAS=1
         
