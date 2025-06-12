@@ -20,14 +20,13 @@ env:
   MODULE_BRANCH: "lineage-22.2"
   MODULE_DIR: "sm7435-module"
   
-  # Toolchain configuration
-  CLANG_REPO: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86"
-  CLANG_BRANCH: "main"
-  CLANG_VERSION: "clang-r522817"
-  GCC_AARCH64_REPO: "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9"
-  GCC_AARCH64_BRANCH: "android12-release"
-  GCC_ARM_REPO: "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9"
-  GCC_ARM_BRANCH: "android12-release"
+  # Toolchain configuration (use LineageOS prebuilts)
+  CLANG_REPO: "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b"
+  CLANG_BRANCH: "lineage-20.0"
+  GCC_AARCH64_REPO: "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-gnu-9.3"
+  GCC_AARCH64_BRANCH: "lineage-22.2"
+  GCC_ARM_REPO: "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9"
+  GCC_ARM_BRANCH: "lineage-19.1"
   
   # Build environment
   KERNEL_DIR: "sm7435"
@@ -105,43 +104,24 @@ jobs:
           https://github.com/misakazip/AnyKernel3.git ${GITHUB_WORKSPACE}/${ANYKERNEL_DIR}
         echo "AnyKernel3 cloned successfully"
     
-    - name: Download AOSP toolchain
+    - name: Download Lineage toolchain
       run: |
-        echo "Setting up AOSP toolchain..."
+        echo "Setting up Lineage toolchain..."
         mkdir -p ${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}
         cd ${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}
-        
-        # Download prebuilt clang from AOSP
-        echo "Downloading Clang from AOSP..."
+
+        # Download prebuilt clang from Lineage
+        echo "Downloading Clang from Lineage..."
         git clone --depth=1 --single-branch --branch=${CLANG_BRANCH} \
-          ${CLANG_REPO} clang-repo
-        
-        # Extract the specific clang version
-        if [ -d "clang-repo/${CLANG_VERSION}" ]; then
-          cp -r clang-repo/${CLANG_VERSION} clang
-          echo "Using Clang version: ${CLANG_VERSION}"
-        else
-          echo "Clang version ${CLANG_VERSION} not found, using latest available"
-          # Find the latest clang version
-          LATEST_CLANG=$(ls clang-repo/ | grep "clang-r" | sort -V | tail -1)
-          if [ -n "$LATEST_CLANG" ]; then
-            cp -r clang-repo/${LATEST_CLANG} clang
-            echo "Using latest Clang version: ${LATEST_CLANG}"
-          else
-            echo "No suitable Clang version found"
-            exit 1
-          fi
-        fi
-        
-        # Clean up clang repo to save space
-        rm -rf clang-repo
-        
-        # Download GCC toolchains from AOSP
-        echo "Downloading GCC aarch64 toolchain from AOSP..."
+          ${CLANG_REPO} clang
+        echo "Clang downloaded successfully"
+
+        # Download GCC toolchains from Lineage
+        echo "Downloading GCC aarch64 toolchain from Lineage..."
         git clone --depth=1 --single-branch --branch=${GCC_AARCH64_BRANCH} \
           ${GCC_AARCH64_REPO} gcc-aarch64
-        
-        echo "Downloading GCC arm toolchain from AOSP..."
+
+        echo "Downloading GCC arm toolchain from Lineage..."
         git clone --depth=1 --single-branch --branch=${GCC_ARM_BRANCH} \
           ${GCC_ARM_REPO} gcc-arm
         
@@ -172,7 +152,7 @@ jobs:
         export CROSS_COMPILE=aarch64-linux-android-
         export CROSS_COMPILE_ARM32=arm-linux-androideabi-
         export CC=clang
-        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export CLANG_TRIPLE=aarch64-buildroot-linux-gnu-
         
         # Clean previous builds
         make clean && make mrproper
