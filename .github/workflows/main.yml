@@ -33,6 +33,12 @@ env:
   ANYKERNEL_DIR: "anykernel3"
   TOOLCHAIN_DIR: "toolchain"
   OUTPUT_DIR: "out"
+  
+  # Boot image configuration (from BoardConfig.mk)
+  BOARD_KERNEL_PAGESIZE: "4096"
+  BOARD_KERNEL_BASE: "0x00000000"
+  BOARD_BOOT_HEADER_VERSION: "4"
+  BOARD_KERNEL_IMAGE_NAME: "Image"
 
 jobs:
   build-kernel:
@@ -70,7 +76,10 @@ jobs:
           ccache \
           ninja-build \
           lz4 \
-          zstd
+          zstd \
+          device-tree-compiler \
+          cpio \
+          xz-utils
         
         # Set up ccache
         echo "/usr/lib/ccache" >> $GITHUB_PATH
@@ -79,6 +88,8 @@ jobs:
         # Create directories
         mkdir -p ${GITHUB_WORKSPACE}/${OUTPUT_DIR}
         mkdir -p ${GITHUB_WORKSPACE}/build_output
+        mkdir -p ${GITHUB_WORKSPACE}/ramdisk-modules
+        mkdir -p ${GITHUB_WORKSPACE}/vendor-modules
     
     - name: Clone kernel repository
       run: |
@@ -162,9 +173,9 @@ jobs:
         
         echo "Kernel configuration completed"
     
-    - name: Build kernel and boot image
+    - name: Build kernel and modules
       run: |
-        echo "Building kernel and boot image..."
+        echo "Building kernel and modules..."
         cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
         
         # Set build environment
@@ -184,10 +195,10 @@ jobs:
         # Get toolchain versions for logging
         echo "Toolchain versions:"
         clang --version
-        aarch64-linux-android-gcc --version | head -1
+        aarch64-buildroot-linux-gnu-gcc --version | head -1
         arm-linux-androideabi-gcc --version | head -1
         
-        # Build kernel and all images
+        # Build kernel image and DTBs
         make O=${GITHUB_WORKSPACE}/${OUTPUT_DIR} \
           ARCH=${ARCH} \
           CC=clang \
@@ -197,111 +208,159 @@ jobs:
           LLVM=1 \
           LLVM_IAS=1 \
           -j${THREADS} \
-          all
+          Image dtbs
         
-        echo "Kernel build completed successfully"
+        # Build modules
+        make O=${GITHUB_WORKSPACE}/${OUTPUT_DIR} \
+          ARCH=${ARCH} \
+          CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-buildroot-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+          LLVM=1 \
+          LLVM_IAS=1 \
+          -j${THREADS} \
+          modules
         
-        # Check what was built
-        echo "Checking build outputs..."
-        find ${GITHUB_WORKSPACE}/${OUTPUT_DIR} -name "*.img" -o -name "Image*" -o -name "zImage*" | head -20
+        echo "Kernel and modules build completed successfully"
+    
+    - name: Install modules and organize
+      run: |
+        echo "Installing and organizing modules..."
+        cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
+        
+        # Create module directories
+        mkdir -p ${GITHUB_WORKSPACE}/modules_temp
+        mkdir -p ${GITHUB_WORKSPACE}/ramdisk-modules
+        mkdir -p ${GITHUB_WORKSPACE}/vendor-modules
+        
+        # Install modules to temp directory
+        make O=${GITHUB_WORKSPACE}/${OUTPUT_DIR} \
+          ARCH=${ARCH} \
+          CROSS_COMPILE=aarch64-buildroot-linux-gnu- \
+          INSTALL_MOD_PATH=${GITHUB_WORKSPACE}/modules_temp \
+          modules_install
+        
+        # Strip modules
+        find ${GITHUB_WORKSPACE}/modules_temp -name "*.ko" -exec ${CROSS_COMPILE}strip --strip-debug {} \;
+        
+        # Copy modules based on BoardConfig.mk configuration
+        if [ -f "${GITHUB_WORKSPACE}/${MODULE_DIR}/ramdisk-modules/modules.load" ]; then
+          echo "Organizing ramdisk modules..."
+          while IFS= read -r module; do
+            if [ -n "$module" ] && [[ ! "$module" =~ ^[[:space:]]*# ]]; then
+              find ${GITHUB_WORKSPACE}/modules_temp -name "$module" -exec cp {} ${GITHUB_WORKSPACE}/ramdisk-modules/ \;
+            fi
+          done < "${GITHUB_WORKSPACE}/${MODULE_DIR}/ramdisk-modules/modules.load"
+          
+          # Copy modules.load and modules.blocklist for ramdisk
+          cp "${GITHUB_WORKSPACE}/${MODULE_DIR}/ramdisk-modules/modules.load" ${GITHUB_WORKSPACE}/ramdisk-modules/
+          if [ -f "${GITHUB_WORKSPACE}/${MODULE_DIR}/ramdisk-modules/modules.blocklist" ]; then
+            cp "${GITHUB_WORKSPACE}/${MODULE_DIR}/ramdisk-modules/modules.blocklist" ${GITHUB_WORKSPACE}/ramdisk-modules/
+          fi
+        fi
+        
+        if [ -f "${GITHUB_WORKSPACE}/${MODULE_DIR}/vendor-modules/modules.load" ]; then
+          echo "Organizing vendor modules..."
+          while IFS= read -r module; do
+            if [ -n "$module" ] && [[ ! "$module" =~ ^[[:space:]]*# ]]; then
+              find ${GITHUB_WORKSPACE}/modules_temp -name "$module" -exec cp {} ${GITHUB_WORKSPACE}/vendor-modules/ \;
+            fi
+          done < "${GITHUB_WORKSPACE}/${MODULE_DIR}/vendor-modules/modules.load"
+          
+          # Copy modules.load and modules.blocklist for vendor
+          cp "${GITHUB_WORKSPACE}/${MODULE_DIR}/vendor-modules/modules.load" ${GITHUB_WORKSPACE}/vendor-modules/
+          if [ -f "${GITHUB_WORKSPACE}/${MODULE_DIR}/vendor-modules/modules.blocklist" ]; then
+            cp "${GITHUB_WORKSPACE}/${MODULE_DIR}/vendor-modules/modules.blocklist" ${GITHUB_WORKSPACE}/vendor-modules/
+          fi
+        fi
+        
+        echo "Module organization completed"
+        echo "Ramdisk modules:"
+        ls -la ${GITHUB_WORKSPACE}/ramdisk-modules/
+        echo "Vendor modules:"
+        ls -la ${GITHUB_WORKSPACE}/vendor-modules/
+    
+    - name: Build DTB image
+      run: |
+        echo "Building DTB image..."
+        cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
+        
+        # Find all DTB files
+        DTB_FILES=$(find ${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/arm64/boot/dts -name "*.dtb" | sort)
+        
+        if [ -n "$DTB_FILES" ]; then
+          echo "Found DTB files:"
+          echo "$DTB_FILES"
+          
+          # Create dtb.img by concatenating all DTB files
+          cat $DTB_FILES > ${GITHUB_WORKSPACE}/${OUTPUT_DIR}/dtb.img
+          echo "DTB image created: dtb.img"
+          
+          # Also copy individual DTB files
+          cp $DTB_FILES ${GITHUB_WORKSPACE}/build_output/
+        else
+          echo "No DTB files found"
+        fi
+    
+    - name: Create boot image
+      run: |
+        echo "Creating boot image..."
+        
+        # Download mkbootimg if not available
+        if ! command -v mkbootimg &> /dev/null; then
+          echo "Downloading mkbootimg..."
+          wget -O ${GITHUB_WORKSPACE}/mkbootimg https://android.googlesource.com/platform/system/tools/mkbootimg/+archive/master.tar.gz
+          # For now, we'll create a simple boot image structure
+        fi
+        
+        # Create boot image with proper parameters from BoardConfig.mk
+        KERNEL_IMAGE="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/arm64/boot/Image"
+        DTB_IMAGE="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/dtb.img"
+        
+        if [ -f "$KERNEL_IMAGE" ]; then
+          # Create a simple boot.img structure
+          # Note: This is a simplified approach. In a real build system, 
+          # you would use proper mkbootimg with ramdisk and other components
+          
+          # Copy kernel image
+          cp "$KERNEL_IMAGE" ${GITHUB_WORKSPACE}/build_output/
+          
+          # Create kernel command line file
+          cat > ${GITHUB_WORKSPACE}/build_output/cmdline.txt << 'EOF'
+video=vfb:640x400,bpp=32,memsize=3072000 disable_dma32=on androidboot.hardware=qcom androidboot.memcg=1 androidboot.usbcontroller=a600000.dwc3 androidboot.init_fatal_reboot_target=recovery
+EOF
+          
+          # Copy DTB if available
+          if [ -f "$DTB_IMAGE" ]; then
+            cp "$DTB_IMAGE" ${GITHUB_WORKSPACE}/build_output/
+          fi
+          
+          echo "Boot image components prepared"
+        else
+          echo "Kernel image not found at expected location"
+          find ${GITHUB_WORKSPACE}/${OUTPUT_DIR} -name "Image*" -type f
+        fi
     
     - name: Extract build artifacts
       run: |
         echo "Extracting build artifacts..."
         
-        # Find and copy kernel image
-        if [ "${ARCH}" = "arm64" ]; then
-          KERNEL_IMAGE="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/arm64/boot/Image.gz"
-          if [ -f "${KERNEL_IMAGE}" ]; then
-            cp ${KERNEL_IMAGE} ${GITHUB_WORKSPACE}/build_output/
-            echo "KERNEL_IMAGE=${KERNEL_IMAGE}" >> $GITHUB_ENV
-            echo "Kernel image copied: Image.gz"
-          else
-            # Try alternative locations
-            KERNEL_IMAGE="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/arm64/boot/Image"
-            if [ -f "${KERNEL_IMAGE}" ]; then
-              cp ${KERNEL_IMAGE} ${GITHUB_WORKSPACE}/build_output/
-              echo "KERNEL_IMAGE=${KERNEL_IMAGE}" >> $GITHUB_ENV
-              echo "Kernel image copied: Image"
-            fi
-          fi
-        elif [ "${ARCH}" = "arm" ]; then
-          KERNEL_IMAGE="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/arm/boot/zImage"
-          if [ -f "${KERNEL_IMAGE}" ]; then
-            cp ${KERNEL_IMAGE} ${GITHUB_WORKSPACE}/build_output/
-            echo "KERNEL_IMAGE=${KERNEL_IMAGE}" >> $GITHUB_ENV
-            echo "Kernel image copied: zImage"
-          fi
+        # Copy kernel image
+        KERNEL_IMAGE="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/arm64/boot/Image"
+        if [ -f "${KERNEL_IMAGE}" ]; then
+          cp ${KERNEL_IMAGE} ${GITHUB_WORKSPACE}/build_output/
+          echo "KERNEL_IMAGE=${KERNEL_IMAGE}" >> $GITHUB_ENV
+          echo "Kernel image copied: Image"
         fi
         
-        # Look for boot.img in various locations
-        BOOT_IMG_FOUND=false
-        BOOT_IMG_LOCATIONS=(
-          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/boot.img"
-          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/${ARCH}/boot/boot.img"
-          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/images/boot.img"
-          "${GITHUB_WORKSPACE}/${KERNEL_DIR}/boot.img"
-        )
-        
-        for location in "${BOOT_IMG_LOCATIONS[@]}"; do
-          if [ -f "${location}" ]; then
-            cp "${location}" ${GITHUB_WORKSPACE}/build_output/
-            echo "BOOT_IMG=${location}" >> $GITHUB_ENV
-            echo "boot.img found and copied from: ${location}"
-            BOOT_IMG_FOUND=true
-            break
-          fi
-        done
-        
-        if [ "$BOOT_IMG_FOUND" = false ]; then
-          echo "boot.img not found in expected locations"
-          echo "Searching for any .img files..."
-          find ${GITHUB_WORKSPACE}/${OUTPUT_DIR} -name "*.img" -type f
+        # Copy modules
+        if [ -d "${GITHUB_WORKSPACE}/ramdisk-modules" ]; then
+          cp -r ${GITHUB_WORKSPACE}/ramdisk-modules ${GITHUB_WORKSPACE}/build_output/
         fi
         
-        # Copy device tree blobs
-        DTB_DIR="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/${ARCH}/boot/dts"
-        if [ -d "${DTB_DIR}" ]; then
-          find ${DTB_DIR} -name "*.dtb" -exec cp {} ${GITHUB_WORKSPACE}/build_output/ \;
-          echo "DTB files copied"
-        fi
-        
-        # Copy DTBO if exists
-        DTBO_LOCATIONS=(
-          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/${ARCH}/boot/dtbo.img"
-          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/dtbo.img"
-          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/images/dtbo.img"
-        )
-        
-        for location in "${DTBO_LOCATIONS[@]}"; do
-          if [ -f "${location}" ]; then
-            cp "${location}" ${GITHUB_WORKSPACE}/build_output/
-            echo "DTBO copied from: ${location}"
-            break
-          fi
-        done
-        
-        # Copy vendor_boot.img if exists
-        VENDOR_BOOT_LOCATIONS=(
-          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/vendor_boot.img"
-          "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/images/vendor_boot.img"
-        )
-        
-        for location in "${VENDOR_BOOT_LOCATIONS[@]}"; do
-          if [ -f "${location}" ]; then
-            cp "${location}" ${GITHUB_WORKSPACE}/build_output/
-            echo "vendor_boot.img copied from: ${location}"
-            break
-          fi
-        done
-        
-        # Install kernel modules
-        if [ -d "${GITHUB_WORKSPACE}/${OUTPUT_DIR}" ]; then
-          make O=${GITHUB_WORKSPACE}/${OUTPUT_DIR} \
-            ARCH=${ARCH} \
-            CROSS_COMPILE=aarch64-linux-android- \
-            INSTALL_MOD_PATH=${GITHUB_WORKSPACE}/build_output \
-            modules_install 2>/dev/null || echo "No modules to install"
+        if [ -d "${GITHUB_WORKSPACE}/vendor-modules" ]; then
+          cp -r ${GITHUB_WORKSPACE}/vendor-modules ${GITHUB_WORKSPACE}/build_output/
         fi
         
         echo "Build artifacts extraction completed"
@@ -316,7 +375,7 @@ jobs:
         # Clean existing files
         rm -f Image.gz Image zImage dtb *.img
         
-        # Configure AnyKernel3
+        # Configure AnyKernel3 for header version 4 and proper parameters
         cat > anykernel.sh << 'EOF'
         # AnyKernel3 Ramdisk Mod Script
         # osm0sis @ xda-developers
@@ -326,7 +385,7 @@ jobs:
         properties() { '
         kernel.string=Android Kernel by misakazip @ $(date +%Y-%m-%d)
         do.devicecheck=0
-        do.modules=0
+        do.modules=1
         do.systemless=1
         do.cleanup=1
         do.cleanuponabort=0
@@ -342,8 +401,16 @@ jobs:
         # shell variables
         block=/dev/block/bootdevice/by-name/boot;
         is_slot_device=true;
-        ramdisk_compression=auto;
+        ramdisk_compression=lz4;
         patch_vbmeta_flag=auto;
+        
+        # boot header version 4 support
+        boot_header_version=4;
+        kernel_offset=0x00008000;
+        ramdisk_offset=0x01000000;
+        tags_offset=0x00000100;
+        page_size=4096;
+        base=0x00000000;
         
         ## AnyKernel methods (DO NOT CHANGE)
         # import patching functions/variables - see for reference
@@ -356,27 +423,43 @@ jobs:
         
         ## AnyKernel install
         dump_boot;
+        
+        # Install kernel modules
+        if [ -d modules ]; then
+          ui_print "Installing kernel modules...";
+          cp -rf modules/* $MODPATH/;
+        fi;
+        
         write_boot;
         ## end install
         EOF
         
         # Copy kernel image
-        if [ "${ARCH}" = "arm64" ]; then
-          if [ -f "${GITHUB_WORKSPACE}/build_output/Image.gz" ]; then
-            cp ${GITHUB_WORKSPACE}/build_output/Image.gz ./
-          elif [ -f "${GITHUB_WORKSPACE}/build_output/Image" ]; then
-            cp ${GITHUB_WORKSPACE}/build_output/Image ./
-          fi
-        elif [ "${ARCH}" = "arm" ]; then
-          if [ -f "${GITHUB_WORKSPACE}/build_output/zImage" ]; then
-            cp ${GITHUB_WORKSPACE}/build_output/zImage ./
-          fi
+        if [ -f "${GITHUB_WORKSPACE}/build_output/Image" ]; then
+          cp ${GITHUB_WORKSPACE}/build_output/Image ./
         fi
         
-        # Copy DTB files if they exist
-        if ls ${GITHUB_WORKSPACE}/build_output/*.dtb 1> /dev/null 2>&1; then
-          cp ${GITHUB_WORKSPACE}/build_output/*.dtb ./
-          echo "DTB files added to AnyKernel3"
+        # Copy DTB image if it exists
+        if [ -f "${GITHUB_WORKSPACE}/build_output/dtb.img" ]; then
+          cp ${GITHUB_WORKSPACE}/build_output/dtb.img ./dtb
+          echo "DTB image added to AnyKernel3"
+        fi
+        
+        # Copy modules
+        if [ -d "${GITHUB_WORKSPACE}/build_output/ramdisk-modules" ] || [ -d "${GITHUB_WORKSPACE}/build_output/vendor-modules" ]; then
+          mkdir -p modules/vendor/lib/modules
+          
+          # Copy ramdisk modules
+          if [ -d "${GITHUB_WORKSPACE}/build_output/ramdisk-modules" ]; then
+            cp -r ${GITHUB_WORKSPACE}/build_output/ramdisk-modules/* modules/vendor/lib/modules/
+          fi
+          
+          # Copy vendor modules  
+          if [ -d "${GITHUB_WORKSPACE}/build_output/vendor-modules" ]; then
+            cp -r ${GITHUB_WORKSPACE}/build_output/vendor-modules/* modules/vendor/lib/modules/
+          fi
+          
+          echo "Kernel modules added to AnyKernel3"
         fi
         
         # Create timestamp
@@ -399,31 +482,29 @@ jobs:
         
         # Get toolchain versions
         CLANG_VER=$(clang --version | head -1)
-        GCC_AARCH64_VER=$(aarch64-linux-android-gcc --version | head -1)
+        GCC_AARCH64_VER=$(aarch64-buildroot-linux-gnu-gcc --version | head -1)
         GCC_ARM_VER=$(arm-linux-androideabi-gcc --version | head -1)
         
         # Check what files were actually built
         BUILT_FILES=""
-        if [ -f "${GITHUB_WORKSPACE}/build_output/boot.img" ]; then
-          BUILT_FILES="${BUILT_FILES}\n- boot.img ($(du -h ${GITHUB_WORKSPACE}/build_output/boot.img | cut -f1))"
-        fi
-        if [ -f "${GITHUB_WORKSPACE}/build_output/Image.gz" ]; then
-          BUILT_FILES="${BUILT_FILES}\n- Image.gz ($(du -h ${GITHUB_WORKSPACE}/build_output/Image.gz | cut -f1))"
-        fi
         if [ -f "${GITHUB_WORKSPACE}/build_output/Image" ]; then
           BUILT_FILES="${BUILT_FILES}\n- Image ($(du -h ${GITHUB_WORKSPACE}/build_output/Image | cut -f1))"
         fi
-        if [ -f "${GITHUB_WORKSPACE}/build_output/zImage" ]; then
-          BUILT_FILES="${BUILT_FILES}\n- zImage ($(du -h ${GITHUB_WORKSPACE}/build_output/zImage | cut -f1))"
+        if [ -f "${GITHUB_WORKSPACE}/build_output/dtb.img" ]; then
+          BUILT_FILES="${BUILT_FILES}\n- dtb.img ($(du -h ${GITHUB_WORKSPACE}/build_output/dtb.img | cut -f1))"
         fi
         if ls ${GITHUB_WORKSPACE}/build_output/*.zip 1> /dev/null 2>&1; then
           for zip in ${GITHUB_WORKSPACE}/build_output/*.zip; do
             BUILT_FILES="${BUILT_FILES}\n- $(basename $zip) ($(du -h $zip | cut -f1))"
           done
         fi
-        if ls ${GITHUB_WORKSPACE}/build_output/*.dtb 1> /dev/null 2>&1; then
-          DTB_COUNT=$(ls ${GITHUB_WORKSPACE}/build_output/*.dtb | wc -l)
-          BUILT_FILES="${BUILT_FILES}\n- ${DTB_COUNT} DTB files"
+        if [ -d "${GITHUB_WORKSPACE}/build_output/ramdisk-modules" ]; then
+          MODULE_COUNT=$(find ${GITHUB_WORKSPACE}/build_output/ramdisk-modules -name "*.ko" | wc -l)
+          BUILT_FILES="${BUILT_FILES}\n- ${MODULE_COUNT} ramdisk modules"
+        fi
+        if [ -d "${GITHUB_WORKSPACE}/build_output/vendor-modules" ]; then
+          MODULE_COUNT=$(find ${GITHUB_WORKSPACE}/build_output/vendor-modules -name "*.ko" | wc -l)
+          BUILT_FILES="${BUILT_FILES}\n- ${MODULE_COUNT} vendor modules"
         fi
         
         cat > ${GITHUB_WORKSPACE}/build_output/build_info.txt << EOF
@@ -439,6 +520,12 @@ jobs:
         - Defconfig: ${DEFCONFIG}
         - Device: ${DEVICE_NAME}
         
+        Boot Image Configuration:
+        - Header Version: ${BOARD_BOOT_HEADER_VERSION}
+        - Page Size: ${BOARD_KERNEL_PAGESIZE}
+        - Base Address: ${BOARD_KERNEL_BASE}
+        - Kernel Image Name: ${BOARD_KERNEL_IMAGE_NAME}
+        
         Source Information:
         - Repository: ${KERNEL_REPO}
         - Branch: ${KERNEL_BRANCH}
@@ -449,7 +536,6 @@ jobs:
         - Clang: ${CLANG_VER}
         - GCC aarch64: ${GCC_AARCH64_VER}
         - GCC arm: ${GCC_ARM_VER}
-        - Clang Version: ${CLANG_VERSION}
         - Clang Branch: ${CLANG_BRANCH}
         - GCC aarch64 Branch: ${GCC_AARCH64_BRANCH}
         - GCC arm Branch: ${GCC_ARM_BRANCH}
@@ -466,11 +552,12 @@ jobs:
         path: |
           build_output/*.zip
           build_output/*.img
-          build_output/Image.gz
           build_output/Image
-          build_output/zImage
           build_output/*.dtb
+          build_output/ramdisk-modules/
+          build_output/vendor-modules/
           build_output/build_info.txt
+          build_output/cmdline.txt
         retention-days: 30
         compression-level: 9
     
@@ -490,25 +577,31 @@ jobs:
           - Build Date: $(date +"%Y-%m-%d %H:%M UTC")
           - Builder: misakazip
           
+          **Boot Configuration:**
+          - Header Version: ${{ env.BOARD_BOOT_HEADER_VERSION }}
+          - Page Size: ${{ env.BOARD_KERNEL_PAGESIZE }}
+          - Base Address: ${{ env.BOARD_KERNEL_BASE }}
+          - Kernel Image: ${{ env.BOARD_KERNEL_IMAGE_NAME }}
+          
           **Source:**
           - Repository: ${{ env.KERNEL_REPO }}
           - Branch: ${{ env.KERNEL_BRANCH }}
           
-          **Toolchain (AOSP):**
-          - Clang: ${{ env.CLANG_VERSION }} (Branch: ${{ env.CLANG_BRANCH }})
-          - GCC aarch64: AOSP prebuilt (Branch: ${{ env.GCC_AARCH64_BRANCH }})
-          - GCC arm: AOSP prebuilt (Branch: ${{ env.GCC_ARM_BRANCH }})
+          **Toolchain (LineageOS):**
+          - Clang: ${{ env.CLANG_BRANCH }}
+          - GCC aarch64: ${{ env.GCC_AARCH64_BRANCH }}
+          - GCC arm: ${{ env.GCC_ARM_BRANCH }}
           
           **Built Files:**
-          - 📦 AnyKernel3 flashable zip
-          - 🥾 boot.img (if generated during build)
-          - 🐧 Kernel image (Image.gz/Image/zImage)
-          - 🌳 Device tree blobs (if available)
+          - 📦 AnyKernel3 flashable zip (with modules)
+          - 🐧 Kernel image (Image)
+          - 🌳 Device tree blob image (dtb.img)
+          - 🔧 Kernel modules (ramdisk and vendor)
           - 📄 Build information
           
           **Installation:**
           1. Flash the AnyKernel3 zip via custom recovery (recommended)
-          2. Or use `fastboot flash boot boot.img` (if boot.img is available)
+          2. Modules will be automatically installed to the correct locations
         files: |
           build_output/*.zip
           build_output/*.img
