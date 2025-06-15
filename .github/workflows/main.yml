@@ -328,8 +328,8 @@ jobs:
           
           # Create kernel command line file
           cat > ${GITHUB_WORKSPACE}/build_output/cmdline.txt << 'EOF'
-video=vfb:640x400,bpp=32,memsize=3072000 disable_dma32=on androidboot.hardware=qcom androidboot.memcg=1 androidboot.usbcontroller=a600000.dwc3 androidboot.init_fatal_reboot_target=recovery
-EOF
+        video=vfb:640x400,bpp=32,memsize=3072000 disable_dma32=on androidboot.hardware=qcom androidboot.memcg=1 androidboot.usbcontroller=a600000.dwc3 androidboot.init_fatal_reboot_target=recovery
+        EOF
           
           # Copy DTB if available
           if [ -f "$DTB_IMAGE" ]; then
@@ -548,7 +548,7 @@ EOF
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: android-kernel-${{ env.DEVICE_NAME }}-${{ env.ARCH }}-$(date +%Y%m%d-%H%M)
+        name: android-kernel-${{ env.DEVICE_NAME }}-${{ env.ARCH }}-${{ github.run_number }}
         path: |
           build_output/*.zip
           build_output/*.img
@@ -565,7 +565,7 @@ EOF
       if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: kernel-${{ env.DEVICE_NAME }}-$(date +%Y%m%d-%H%M)
+        tag_name: kernel-${{ env.DEVICE_NAME }}-${{ github.run_number }}
         name: Android Kernel Build - ${{ env.DEVICE_NAME }} (${{ env.ARCH }})
         body: |
           ## Android Kernel Build
@@ -574,7 +574,7 @@ EOF
           - Device: ${{ env.DEVICE_NAME }}
           - Architecture: ${{ env.ARCH }}
           - Defconfig: ${{ env.DEFCONFIG }}
-          - Build Date: $(date +"%Y-%m-%d %H:%M UTC")
+          - Build Date: ${{ github.run_number }}
           - Builder: misakazip
           
           **Boot Configuration:**
@@ -617,3 +617,4 @@ EOF
         echo "Cleaning up build environment..."
         ccache -s
         df -h
+        
