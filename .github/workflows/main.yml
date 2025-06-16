@@ -115,6 +115,41 @@ jobs:
           https://github.com/misakazip/AnyKernel3.git ${GITHUB_WORKSPACE}/${ANYKERNEL_DIR}
         echo "AnyKernel3 cloned successfully"
     
+    - name: Fix focaltech touchscreen firmware path
+      run: |
+        echo "Fixing focaltech touchscreen firmware path..."
+        cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
+        
+        # Check if the focaltech driver exists
+        FOCALTECH_DIR="drivers/input/touchscreen/focaltech_touch"
+        if [ -d "$FOCALTECH_DIR" ]; then
+          echo "Found focaltech touchscreen driver"
+          
+          # Check if firmware file exists in the expected location
+          FW_FILE="$FOCALTECH_DIR/include/firmware/fw_sample.i"
+          if [ -f "$FW_FILE" ]; then
+            echo "Firmware file found at: $FW_FILE"
+            
+            # Fix the path in the config header
+            CONFIG_FILE="$FOCALTECH_DIR/focaltech_config.h"
+            if [ -f "$CONFIG_FILE" ]; then
+              echo "Fixing firmware path in config file..."
+              # Change the relative path to absolute path from driver directory
+              sed -i 's|"include/firmware/fw_sample.i"|"drivers/input/touchscreen/focaltech_touch/include/firmware/fw_sample.i"|g' "$CONFIG_FILE"
+              echo "Firmware path fixed"
+            else
+              echo "Config file not found: $CONFIG_FILE"
+            fi
+          else
+            echo "Firmware file not found at expected location: $FW_FILE"
+            # Search for the firmware file
+            echo "Searching for fw_sample.i..."
+            find . -name "fw_sample.i" -type f
+          fi
+        else
+          echo "Focaltech touchscreen driver not found"
+        fi
+    
     - name: Download Lineage toolchain
       run: |
         echo "Setting up Lineage toolchain..."
@@ -188,6 +223,9 @@ jobs:
         export LLVM=1
         export LLVM_IAS=1
         
+        # Add additional include paths for focaltech driver
+        export EXTRA_CFLAGS="-I${GITHUB_WORKSPACE}/${KERNEL_DIR}/drivers/input/touchscreen/focaltech_touch"
+        
         # Get number of CPU cores
         THREADS=$(nproc --all)
         echo "Building with ${THREADS} threads..."
@@ -207,6 +245,7 @@ jobs:
           CROSS_COMPILE_ARM32=arm-linux-androideabi- \
           LLVM=1 \
           LLVM_IAS=1 \
+          EXTRA_CFLAGS="${EXTRA_CFLAGS}" \
           -j${THREADS} \
           Image dtbs
         
@@ -219,6 +258,7 @@ jobs:
           CROSS_COMPILE_ARM32=arm-linux-androideabi- \
           LLVM=1 \
           LLVM_IAS=1 \
+          EXTRA_CFLAGS="${EXTRA_CFLAGS}" \
           -j${THREADS} \
           modules
         
@@ -307,22 +347,11 @@ jobs:
       run: |
         echo "Creating boot image..."
         
-        # Download mkbootimg if not available
-        if ! command -v mkbootimg &> /dev/null; then
-          echo "Downloading mkbootimg..."
-          wget -O ${GITHUB_WORKSPACE}/mkbootimg https://android.googlesource.com/platform/system/tools/mkbootimg/+archive/master.tar.gz
-          # For now, we'll create a simple boot image structure
-        fi
-        
         # Create boot image with proper parameters from BoardConfig.mk
         KERNEL_IMAGE="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/arch/arm64/boot/Image"
         DTB_IMAGE="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/dtb.img"
         
         if [ -f "$KERNEL_IMAGE" ]; then
-          # Create a simple boot.img structure
-          # Note: This is a simplified approach. In a real build system, 
-          # you would use proper mkbootimg with ramdisk and other components
-          
           # Copy kernel image
           cp "$KERNEL_IMAGE" ${GITHUB_WORKSPACE}/build_output/
           
