@@ -266,6 +266,19 @@ jobs:
     - name: Configure kernel
       run: |
         echo "Configuring kernel..."
+        # Fix Focaltech touchscreen firmware path issue
+        echo "Fixing Focaltech touchscreen firmware path..."
+        if [ -f "drivers/input/touchscreen/focaltech_touch/include/firmware/fw_sample.i" ]; then
+          mkdir -p include/firmware
+          ln -sf ../drivers/input/touchscreen/focaltech_touch/include/firmware/fw_sample.i include/firmware/fw_sample.i
+          echo "Created symbolic link for focaltech firmware"
+          ls -la include/firmware/
+        else
+          echo "Focaltech firmware file not found!"
+          ls -l
+          find . -name fw_sample.i
+          exit 1
+        fi
         cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
         
         # Set build environment
@@ -290,21 +303,7 @@ jobs:
       run: |
         echo "Building kernel and modules..."
         cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
-        
-        # Fix Focaltech touchscreen firmware path issue
-        echo "Fixing Focaltech touchscreen firmware path..."
-        if [ -f "drivers/input/touchscreen/focaltech_touch/include/firmware/fw_sample.i" ]; then
-          mkdir -p include/firmware
-          ln -sf ../drivers/input/touchscreen/focaltech_touch/include/firmware/fw_sample.i include/firmware/fw_sample.i
-          echo "Created symbolic link for focaltech firmware"
-          ls -la include/firmware/
-        else
-          echo "Focaltech firmware file not found!"
-          ls -l
-          find . -name fw_sample.i
-          exit 1
-        fi
-        
+    
         # Set build environment
         export ARCH=${ARCH}
         export SUBARCH=${ARCH}
