@@ -56,6 +56,15 @@ jobs:
         sudo rm -rf "$AGENT_TOOLSDIRECTORY"
         df -h
     
+    # APTパッケージキャッシュ
+    - name: Cache APT packages
+      uses: actions/cache@v4
+      with:
+        path: /var/cache/apt
+        key: ${{ runner.os }}-apt-${{ hashFiles('**/apt-packages.list') }}-${{ github.run_number }}
+        restore-keys: |
+          ${{ runner.os }}-apt-
+    
     - name: Set up build environment
       run: |
         sudo apt-get update
@@ -83,7 +92,7 @@ jobs:
         
         # Set up ccache
         echo "/usr/lib/ccache" >> $GITHUB_PATH
-        ccache -M 2G
+        ccache -M 5G
         
         # Create directories
         mkdir -p ${GITHUB_WORKSPACE}/${OUTPUT_DIR}
@@ -91,7 +100,61 @@ jobs:
         mkdir -p ${GITHUB_WORKSPACE}/ramdisk-modules
         mkdir -p ${GITHUB_WORKSPACE}/vendor-modules
     
+    # ccacheキャッシュ
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: ~/.ccache
+        key: ${{ runner.os }}-ccache-${{ env.DEVICE_NAME }}-${{ hashFiles('**/Makefile') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-ccache-${{ env.DEVICE_NAME }}-${{ hashFiles('**/Makefile') }}-
+          ${{ runner.os }}-ccache-${{ env.DEVICE_NAME }}-
+          ${{ runner.os }}-ccache-
+    
+    # ツールチェーンキャッシュ
+    - name: Cache toolchain
+      uses: actions/cache@v4
+      id: toolchain-cache
+      with:
+        path: ${{ env.TOOLCHAIN_DIR }}
+        key: ${{ runner.os }}-toolchain-${{ env.CLANG_BRANCH }}-${{ env.GCC_AARCH64_BRANCH }}-${{ env.GCC_ARM_BRANCH }}
+        restore-keys: |
+          ${{ runner.os }}-toolchain-${{ env.CLANG_BRANCH }}-${{ env.GCC_AARCH64_BRANCH }}-
+          ${{ runner.os }}-toolchain-${{ env.CLANG_BRANCH }}-
+          ${{ runner.os }}-toolchain-
+    
+    # カーネルソースキャッシュ
+    - name: Cache kernel source
+      uses: actions/cache@v4
+      id: kernel-cache
+      with:
+        path: ${{ env.KERNEL_DIR }}
+        key: ${{ runner.os }}-kernel-${{ env.KERNEL_BRANCH }}-${{ github.run_number }}
+        restore-keys: |
+          ${{ runner.os }}-kernel-${{ env.KERNEL_BRANCH }}-
+    
+    # モジュールソースキャッシュ
+    - name: Cache module source
+      uses: actions/cache@v4
+      id: module-cache
+      with:
+        path: ${{ env.MODULE_DIR }}
+        key: ${{ runner.os }}-modules-${{ env.MODULE_BRANCH }}-${{ github.run_number }}
+        restore-keys: |
+          ${{ runner.os }}-modules-${{ env.MODULE_BRANCH }}-
+    
+    # AnyKernel3キャッシュ
+    - name: Cache AnyKernel3
+      uses: actions/cache@v4
+      id: anykernel-cache
+      with:
+        path: ${{ env.ANYKERNEL_DIR }}
+        key: ${{ runner.os }}-anykernel3-${{ github.run_number }}
+        restore-keys: |
+          ${{ runner.os }}-anykernel3-
+    
     - name: Clone kernel repository
+      if: steps.kernel-cache.outputs.cache-hit != 'true'
       run: |
         echo "Cloning Android kernel repository..."
         git clone --depth=1 --single-branch --branch=${KERNEL_BRANCH} \
@@ -101,56 +164,49 @@ jobs:
         echo "Kernel repository cloned successfully"
         echo "Latest commit: $(git log --oneline -1)"
     
+    - name: Update kernel repository
+      if: steps.kernel-cache.outputs.cache-hit == 'true'
+      run: |
+        echo "Updating cached kernel repository..."
+        cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
+        git fetch origin ${KERNEL_BRANCH}
+        git reset --hard origin/${KERNEL_BRANCH}
+        echo "Latest commit: $(git log --oneline -1)"
+    
     - name: Clone module repository
+      if: steps.module-cache.outputs.cache-hit != 'true'
       run: |
         echo "Cloning vendor repository..."
         git clone --depth=1 --single-branch --branch=${MODULE_BRANCH} \
           ${MODULE_REPO} ${GITHUB_WORKSPACE}/${MODULE_DIR}
         echo "Module repository cloned successfully"
     
+    - name: Update module repository
+      if: steps.module-cache.outputs.cache-hit == 'true'
+      run: |
+        echo "Updating cached module repository..."
+        cd ${GITHUB_WORKSPACE}/${MODULE_DIR}
+        git fetch origin ${MODULE_BRANCH}
+        git reset --hard origin/${MODULE_BRANCH}
+    
     - name: Clone AnyKernel3
+      if: steps.anykernel-cache.outputs.cache-hit != 'true'
       run: |
         echo "Cloning AnyKernel3..."
         git clone --depth=1 \
           https://github.com/misakazip/AnyKernel3.git ${GITHUB_WORKSPACE}/${ANYKERNEL_DIR}
         echo "AnyKernel3 cloned successfully"
     
-    - name: Fix focaltech touchscreen firmware path
+    - name: Update AnyKernel3
+      if: steps.anykernel-cache.outputs.cache-hit == 'true'
       run: |
-        echo "Fixing focaltech touchscreen firmware path..."
-        cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
-        
-        # Check if the focaltech driver exists
-        FOCALTECH_DIR="drivers/input/touchscreen/focaltech_touch"
-        if [ -d "$FOCALTECH_DIR" ]; then
-          echo "Found focaltech touchscreen driver"
-          
-          # Check if firmware file exists in the expected location
-          FW_FILE="$FOCALTECH_DIR/include/firmware/fw_sample.i"
-          if [ -f "$FW_FILE" ]; then
-            echo "Firmware file found at: $FW_FILE"
-            
-            # Fix the path in the config header
-            CONFIG_FILE="$FOCALTECH_DIR/focaltech_config.h"
-            if [ -f "$CONFIG_FILE" ]; then
-              echo "Fixing firmware path in config file..."
-              # Change the relative path to absolute path from driver directory
-              sed -i 's|"include/firmware/fw_sample.i"|"drivers/input/touchscreen/focaltech_touch/include/firmware/fw_sample.i"|g' "$CONFIG_FILE"
-              echo "Firmware path fixed"
-            else
-              echo "Config file not found: $CONFIG_FILE"
-            fi
-          else
-            echo "Firmware file not found at expected location: $FW_FILE"
-            # Search for the firmware file
-            echo "Searching for fw_sample.i..."
-            find . -name "fw_sample.i" -type f
-          fi
-        else
-          echo "Focaltech touchscreen driver not found"
-        fi
+        echo "Updating cached AnyKernel3..."
+        cd ${GITHUB_WORKSPACE}/${ANYKERNEL_DIR}
+        git fetch origin
+        git reset --hard origin/main
     
     - name: Download Lineage toolchain
+      if: steps.toolchain-cache.outputs.cache-hit != 'true'
       run: |
         echo "Setting up Lineage toolchain..."
         mkdir -p ${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}
@@ -171,6 +227,10 @@ jobs:
         git clone --depth=1 --single-branch --branch=${GCC_ARM_BRANCH} \
           ${GCC_ARM_REPO} gcc-arm
         
+        echo "Toolchain setup completed"
+    
+    - name: Setup toolchain environment
+      run: |
         # Set up environment
         CLANG_PATH="${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}/clang/bin"
         GCC_AARCH64_PATH="${GITHUB_WORKSPACE}/${TOOLCHAIN_DIR}/gcc-aarch64/bin"
@@ -185,7 +245,17 @@ jobs:
         ${CLANG_PATH}/clang --version
         ${GCC_AARCH64_PATH}/aarch64-buildroot-linux-gnu-gcc --version
         ${GCC_ARM_PATH}/arm-linux-androideabi-gcc --version
-        echo "Toolchain setup completed"
+    
+    # ビルド出力キャッシュ（デバッグ用）
+    - name: Cache build output
+      uses: actions/cache@v4
+      id: build-cache
+      with:
+        path: ${{ env.OUTPUT_DIR }}
+        key: ${{ runner.os }}-build-${{ env.DEVICE_NAME }}-${{ hashFiles('**/Makefile') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-build-${{ env.DEVICE_NAME }}-${{ hashFiles('**/Makefile') }}-
+          ${{ runner.os }}-build-${{ env.DEVICE_NAME }}-
     
     - name: Configure kernel
       run: |
@@ -200,8 +270,10 @@ jobs:
         export CC=clang
         export CLANG_TRIPLE=aarch64-buildroot-linux-gnu-
         
-        # Clean previous builds
-        make clean && make mrproper
+        # Clean previous builds if not cached
+        if [ "${{ steps.build-cache.outputs.cache-hit }}" != "true" ]; then
+          make clean && make mrproper
+        fi
         
         # Configure with defconfig
         make O=${GITHUB_WORKSPACE}/${OUTPUT_DIR} ${DEFCONFIG}
@@ -236,6 +308,9 @@ jobs:
         aarch64-buildroot-linux-gnu-gcc --version | head -1
         arm-linux-androideabi-gcc --version | head -1
         
+        # Show ccache stats before build
+        ccache -s
+        
         # Build kernel image and DTBs
         make O=${GITHUB_WORKSPACE}/${OUTPUT_DIR} \
           ARCH=${ARCH} \
@@ -261,6 +336,10 @@ jobs:
           EXTRA_CFLAGS="${EXTRA_CFLAGS}" \
           -j${THREADS} \
           modules
+        
+        # Show ccache stats after build
+        echo "ccache statistics after build:"
+        ccache -s
         
         echo "Kernel and modules build completed successfully"
     
@@ -646,4 +725,3 @@ jobs:
         echo "Cleaning up build environment..."
         ccache -s
         df -h
-        
