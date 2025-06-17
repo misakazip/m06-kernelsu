@@ -100,7 +100,7 @@ jobs:
         mkdir -p ${GITHUB_WORKSPACE}/ramdisk-modules
         mkdir -p ${GITHUB_WORKSPACE}/vendor-modules
     
-    # ccacheキャッシュ
+    # ccacheキャッシュ（失敗時でも保存）
     - name: Cache ccache
       uses: actions/cache@v4
       with:
@@ -110,8 +110,9 @@ jobs:
           ${{ runner.os }}-ccache-${{ env.DEVICE_NAME }}-${{ hashFiles('**/Makefile') }}-
           ${{ runner.os }}-ccache-${{ env.DEVICE_NAME }}-
           ${{ runner.os }}-ccache-
+        save-always: true
     
-    # ツールチェーンキャッシュ
+    # ツールチェーンキャッシュ（失敗時でも保存）
     - name: Cache toolchain
       uses: actions/cache@v4
       id: toolchain-cache
@@ -122,8 +123,9 @@ jobs:
           ${{ runner.os }}-toolchain-${{ env.CLANG_BRANCH }}-${{ env.GCC_AARCH64_BRANCH }}-
           ${{ runner.os }}-toolchain-${{ env.CLANG_BRANCH }}-
           ${{ runner.os }}-toolchain-
+        save-always: true
     
-    # カーネルソースキャッシュ
+    # カーネルソースキャッシュ（失敗時でも保存）
     - name: Cache kernel source
       uses: actions/cache@v4
       id: kernel-cache
@@ -132,8 +134,9 @@ jobs:
         key: ${{ runner.os }}-kernel-${{ env.KERNEL_BRANCH }}-${{ github.run_number }}
         restore-keys: |
           ${{ runner.os }}-kernel-${{ env.KERNEL_BRANCH }}-
+        save-always: true
     
-    # モジュールソースキャッシュ
+    # モジュールソースキャッシュ（失敗時でも保存）
     - name: Cache module source
       uses: actions/cache@v4
       id: module-cache
@@ -142,8 +145,9 @@ jobs:
         key: ${{ runner.os }}-modules-${{ env.MODULE_BRANCH }}-${{ github.run_number }}
         restore-keys: |
           ${{ runner.os }}-modules-${{ env.MODULE_BRANCH }}-
+        save-always: true
     
-    # AnyKernel3キャッシュ
+    # AnyKernel3キャッシュ（失敗時でも保存）
     - name: Cache AnyKernel3
       uses: actions/cache@v4
       id: anykernel-cache
@@ -152,6 +156,7 @@ jobs:
         key: ${{ runner.os }}-anykernel3-${{ github.run_number }}
         restore-keys: |
           ${{ runner.os }}-anykernel3-
+        save-always: true
     
     - name: Clone kernel repository
       if: steps.kernel-cache.outputs.cache-hit != 'true'
@@ -246,7 +251,7 @@ jobs:
         ${GCC_AARCH64_PATH}/aarch64-buildroot-linux-gnu-gcc --version
         ${GCC_ARM_PATH}/arm-linux-androideabi-gcc --version
     
-    # ビルド出力キャッシュ（デバッグ用）
+    # ビルド出力キャッシュ（失敗時でも保存）
     - name: Cache build output
       uses: actions/cache@v4
       id: build-cache
@@ -256,6 +261,7 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-build-${{ env.DEVICE_NAME }}-${{ hashFiles('**/Makefile') }}-
           ${{ runner.os }}-build-${{ env.DEVICE_NAME }}-
+        save-always: true
     
     - name: Configure kernel
       run: |
@@ -284,6 +290,19 @@ jobs:
       run: |
         echo "Building kernel and modules..."
         cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
+        
+        # Fix Focaltech touchscreen firmware path issue
+        echo "Fixing Focaltech touchscreen firmware path..."
+        if [ -f "drivers/input/touchscreen/focaltech_touch/include/firmware/fw_sample.i" ]; then
+          mkdir -p include/firmware
+          ln -sf ../drivers/input/touchscreen/focaltech_touch/include/firmware/fw_sample.i include/firmware/fw_sample.i
+          echo "Created symbolic link for focaltech firmware"
+          ls -la include/firmware/
+        else
+          echo "Focaltech firmware file not found, creating empty file"
+          find . -name fw_sample.i
+          exit 1
+        fi
         
         # Set build environment
         export ARCH=${ARCH}
@@ -655,6 +674,7 @@ jobs:
     
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
+      if: always()
       with:
         name: android-kernel-${{ env.DEVICE_NAME }}-${{ env.ARCH }}-${{ github.run_number }}
         path: |
@@ -670,7 +690,7 @@ jobs:
         compression-level: 9
     
     - name: Create release
-      if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+      if: (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && success()
       uses: softprops/action-gh-release@v1
       with:
         tag_name: kernel-${{ env.DEVICE_NAME }}-${{ github.run_number }}
