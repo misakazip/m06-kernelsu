@@ -265,14 +265,15 @@ jobs:
     
     - name: Configure kernel
       run: |
+        cd ${GITHUB_WORKSPACE}/${KERNEL_DIR}
         echo "Configuring kernel..."
         # Fix Focaltech touchscreen firmware path issue
         echo "Fixing Focaltech touchscreen firmware path..."
-        if [ -f "${GITHUB_WORKSPACE}/${KERNEL_DIR}/drivers/input/touchscreen/focaltech_touch/include/firmware/fw_sample.i" ]; then
-          mkdir -p include/firmware
-          ln -sf ${GITHUB_WORKSPACE}/${KERNEL_DIR}/drivers/input/touchscreen/focaltech_touch/include/firmware/fw_sample.i ${GITHUB_WORKSPACE}/${KERNEL_DIR}/include/firmware/fw_sample.i
+        if [ -f "drivers/input/touchscreen/focaltech_touch/include/firmware/fw_sample.i" ]; then
+          mkdir -p include/firmware/
+          ln -sf drivers/input/touchscreen/focaltech_touch/include/firmware/fw_sample.i include/firmware/fw_sample.i
           echo "Created symbolic link for focaltech firmware"
-          ls -la ${GITHUB_WORKSPACE}/${KERNEL_DIR}/include/firmware/
+          ls -la include/firmware/
         else
           echo "Focaltech firmware file not found!"
           ls ${GITHUB_WORKSPACE}/${KERNEL_DIR} -l
