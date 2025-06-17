@@ -299,7 +299,8 @@ jobs:
           echo "Created symbolic link for focaltech firmware"
           ls -la include/firmware/
         else
-          echo "Focaltech firmware file not found, creating empty file"
+          echo "Focaltech firmware file not found!"
+          ls -l
           find . -name fw_sample.i
           exit 1
         fi
